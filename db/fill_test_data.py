@@ -5,7 +5,7 @@ import os
 import random
 import sqlite3
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 DEFAULT_DB_PATH = Path(os.getenv("DB_PATH", "./app.db")).resolve()
 
@@ -46,7 +46,7 @@ def fill(db_path: Path):
 
     # photos + photo_tasks
     user_ids = [row[0] for row in cur.execute("SELECT id FROM users").fetchall()]
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     for uid in user_ids:
         for i in range(2):  # по 2 фото на юзера
             fu = f"uniq_{uid}_{i}"
@@ -55,7 +55,7 @@ def fill(db_path: Path):
             cur.execute(
                 """INSERT OR IGNORE INTO photos (user_id, tg_file_unique_id, tg_file_id, caption, created_at)
                    VALUES (?, ?, ?, ?, ?)""",
-                (uid, fu, fid, cap, (now - timedelta(minutes=10*i)).isoformat()+"Z")
+                (uid, fu, fid, cap, (now - timedelta(minutes=10*i)).isoformat().replace("+00:00","Z"))
             )
             photo_row = cur.execute(
                 "SELECT id FROM photos WHERE tg_file_unique_id = ?", (fu,)
@@ -64,7 +64,7 @@ def fill(db_path: Path):
                 continue
             pid = photo_row[0]
             status = random.choice(["queued", "running", "done"])
-            next_run = (now + timedelta(minutes=random.randint(1, 30))).isoformat()+"Z" if status != "done" else None
+            next_run = (now + timedelta(minutes=random.randint(1, 30))).isoformat().replace("+00:00","Z") if status != "done" else None
             cur.execute(
                 """INSERT INTO photo_tasks (photo_id, status, retry_count, next_run_at, result_json, created_at, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -74,10 +74,32 @@ def fill(db_path: Path):
                     random.randint(0, 3),
                     next_run,
                     '{"sample":"ok"}' if status == "done" else None,
-                    now.isoformat()+"Z",
-                    now.isoformat()+"Z",
+                    now.isoformat().replace("+00:00","Z"),
+                    now.isoformat().replace("+00:00","Z"),
                 )
             )
+
+    con.commit()
+    con.close()
+
+def clear(db_path: Path):
+    con = sqlite3.connect(str(db_path))
+    con.execute("PRAGMA foreign_keys = ON;")
+    cur = con.cursor()
+
+    # remove kbju_cache test entries
+    for name, variant, source, url, *_rest in PRODUCTS:
+        cur.execute(
+            """DELETE FROM kbju_cache
+                   WHERE normalized_name = ? AND source = ? AND source_url = ? AND version_tag = ?
+            """,
+            (name, source, url, "v1"),
+        )
+
+    # remove test users (CASCADE will delete photos and photo_tasks)
+    test_tg_ids = [u["tg_user_id"] for u in USERS]
+    placeholders = ",".join(["?"] * len(test_tg_ids))
+    cur.execute(f"DELETE FROM users WHERE tg_user_id IN ({placeholders})", test_tg_ids)
 
     con.commit()
     con.close()
@@ -85,10 +107,15 @@ def fill(db_path: Path):
 def main():
     ap = argparse.ArgumentParser(description="Fill SQLite DB with fake test data")
     ap.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to SQLite DB file (default: ./app.db)")
+    ap.add_argument("--clear", action="store_true", help="Remove previously inserted test data and exit")
     args = ap.parse_args()
 
-    fill(Path(args.db))
-    print(f"OK: test data inserted into {args.db}")
+    if args.clear:
+        clear(Path(args.db))
+        print(f"OK: test data cleared from {args.db}")
+    else:
+        fill(Path(args.db))
+        print(f"OK: test data inserted into {args.db}")
 
 if __name__ == "__main__":
     main()
